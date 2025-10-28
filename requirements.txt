@@ -1,3 +1,4 @@
 Flask
 pywebpush
+cryptography
 gunicorn
