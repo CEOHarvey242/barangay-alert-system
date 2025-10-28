@@ -6,9 +6,9 @@ import time
 app = Flask(__name__)
 
 # === CONFIGURATION ===
-VAPID_PUBLIC_KEY = "BCfQs-j8gGE_o7l64blPSF1eCIkNYbO67bXC_PHDruv7jKbo4YamnHj0Ko1YWd6M1HfnYsM-VVSDVpQOsQI9NIk"
-VAPID_PRIVATE_KEY = "SwezzCbMxAFdJKOuTwDw0DpnhnCEUhUaEixUYiwo"
-VAPID_CLAIMS = {"sub": "mailto:BRGYAlertSystem@ph.com"}
+VAPID_PUBLIC_KEY = "BNex77xpbLX96KVS1zJhT0EthcP8rJYCnu5dTL_AO0t_5ewtTPKgmqmknWaJ_2WepQgQjodcxGcFGHhq_xdyR_E"
+VAPID_PRIVATE_KEY = "BkPQ0-CUpnv6QSV87QpPwdlUX9ADMRLQ5dKHXYZL-f4"
+VAPID_CLAIMS = {"sub": "mailto:dukeharveylingcodo@gmail.com"}
 
 subscribers = []  # Stores all browser subscriptions
 arduino_triggered = False
