@@ -1,58 +1,43 @@
 from flask import Flask, request, jsonify, render_template_string
+from pywebpush import webpush, WebPushException
 import threading
 import time
-from pywebpush import webpush, WebPushException
 
 app = Flask(__name__)
 
-# --- VAPID keys ---
+# === CONFIGURATION ===
 VAPID_PUBLIC_KEY = "BCfQs-j8gGE_o7l64blPSF1eCIkNYbO67bXC_PHDruv7jKbo4YamnHj0Ko1YWd6M1HfnYsM-VVSDVpQOsQI9NIk"
-VAPID_PRIVATE_KEY = "SwezzCbMxAFdJKOuTwDw0DpnhnCEUhUaUvaEixUYiwo"
+VAPID_PRIVATE_KEY = "SwezzCbMxAFdJKOuTwDw0DpnhnCEUhUaEixUYiwo"
 VAPID_CLAIMS = {"sub": "mailto:BRGYAlertSystem@ph.com"}
 
-# --- Subscribers list ---
-subscribers = []
-
-# --- Shared state ---
+subscribers = []  # Stores all browser subscriptions
 arduino_triggered = False
 alert_sending = False
 alert_progress = 0
 
 
-@app.route("/")
-def home():
+# === USER PAGE ===
+@app.route("/user")
+def user_page():
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Barangay Alert Dashboard</title>
+        <title>Barangay Alert - User</title>
         <style>
-            body {{ font-family: Arial, sans-serif; background: #f0f4f8; color: #333;
-                   display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
+            body {{ font-family: Arial; background: #f0f4f8; text-align: center; padding-top: 100px; }}
             h1 {{ color: #e74c3c; }}
-            button {{ padding: 10px 20px; font-size: 16px; margin-top: 20px; cursor: pointer; }}
-            #status {{ font-size: 20px; margin-top: 20px; }}
-            .progress-container {{ width: 60%; background: #ddd; border-radius: 10px; margin-top: 20px; height: 30px; overflow: hidden; }}
-            .progress-bar {{ height: 100%; width: 0%; background-color: #3498db; text-align: center; color: white; line-height: 30px; transition: width 0.3s; }}
-            .loader {{ border: 6px solid #f3f3f3; border-top: 6px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin-top: 20px; display: none; }}
-            @keyframes spin {{ 100% {{ transform: rotate(360deg); }} }}
+            button {{ padding: 12px 20px; font-size: 16px; cursor: pointer; margin-top: 20px; }}
         </style>
     </head>
     <body>
-        <h1>🚨 Barangay Alert Dashboard 🚨</h1>
-        <button onclick="subscribeUser()">Subscribe to Alerts</button>
-        <button onclick="triggerTestAlert()">Test Alert</button>
-        <div id="status">Waiting for Arduino response...</div>
-        <div class="progress-container">
-            <div class="progress-bar" id="progress-bar">0%</div>
-        </div>
-        <div class="loader" id="loader"></div>
+        <h1>🚨 Barangay Alert - Resident Portal 🚨</h1>
+        <p>Receive real-time barangay emergency alerts.</p>
+        <button onclick="subscribeUser()">Subscribe for Alerts</button>
 
         <script>
             const vapidKey = "{VAPID_PUBLIC_KEY}";
-
-            // Register service worker and subscribe user
             async function subscribeUser() {{
                 const reg = await navigator.serviceWorker.register("/service-worker.js");
                 const permission = await Notification.requestPermission();
@@ -60,57 +45,17 @@ def home():
                     alert("Please allow notifications to receive alerts.");
                     return;
                 }}
-
                 const sub = await reg.pushManager.subscribe({{
                     userVisibleOnly: true,
                     applicationServerKey: urlBase64ToUint8Array(vapidKey)
                 }});
-
                 await fetch("/subscribe", {{
                     method: "POST",
                     headers: {{ "Content-Type": "application/json" }},
                     body: JSON.stringify(sub)
                 }});
-
-                alert("✅ Subscribed for alerts!");
+                alert("✅ You are now subscribed for barangay alerts!");
             }}
-
-            function triggerTestAlert() {{
-                fetch('/send_alert', {{method: 'GET'}})
-                .then(res => res.json())
-                .then(data => console.log(data));
-            }}
-
-            function updateStatus() {{
-                fetch('/check_status')
-                    .then(response => response.json())
-                    .then(data => {{
-                        const status = document.getElementById('status');
-                        const bar = document.getElementById('progress-bar');
-                        const loader = document.getElementById('loader');
-
-                        if (data.arduino_triggered && !data.alert_sending) {{
-                            status.innerText = "⚠️ Arduino triggered, preparing alerts...";
-                            loader.style.display = "none";
-                        }}
-                        else if (data.alert_sending) {{
-                            status.innerText = "⚠️ Sending alerts...";
-                            loader.style.display = "none";
-                            bar.style.width = data.progress + '%';
-                            bar.innerText = data.progress + '%';
-                        }}
-                        else if (!data.arduino_triggered && !data.alert_sending) {{
-                            status.innerText = "Waiting for Arduino response...";
-                            loader.style.display = "block";
-                            bar.style.width = '0%';
-                            bar.innerText = '0%';
-                        }}
-
-                        setTimeout(updateStatus, 1000);
-                    }})
-                    .catch(err => setTimeout(updateStatus, 5000));
-            }}
-
             function urlBase64ToUint8Array(base64String) {{
                 const padding = "=".repeat((4 - base64String.length % 4) % 4);
                 const base64 = (base64String + padding).replace(/\\-/g, "+").replace(/_/g, "/");
@@ -119,7 +64,59 @@ def home():
                 for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
                 return outputArray;
             }}
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html)
 
+
+# === ADMIN PAGE ===
+@app.route("/admin")
+def admin_page():
+    html = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <title>Barangay Alert Dashboard</title>
+        <style>
+            body { font-family: Arial; background: #f8f9fa; text-align: center; padding-top: 80px; }
+            h1 { color: #c0392b; }
+            button { padding: 10px 20px; font-size: 16px; margin: 10px; cursor: pointer; }
+            .progress-container { width: 60%; background: #ddd; border-radius: 10px; margin: 20px auto; height: 30px; overflow: hidden; }
+            .progress-bar { height: 100%; width: 0%; background-color: #3498db; color: white; text-align: center; line-height: 30px; transition: width 0.3s; }
+        </style>
+    </head>
+    <body>
+        <h1>🧑‍💼 Barangay Admin Dashboard</h1>
+        <p>Monitor system status and send alerts to all residents.</p>
+        <button onclick="triggerAlert()">🚨 Send Emergency Alert</button>
+        <div class="progress-container">
+            <div class="progress-bar" id="bar">0%</div>
+        </div>
+        <div id="status">Waiting for Arduino trigger...</div>
+
+        <script>
+            function triggerAlert() {
+                fetch('/send_alert').then(r => r.json()).then(console.log);
+            }
+
+            function updateStatus() {
+                fetch('/check_status')
+                    .then(r => r.json())
+                    .then(data => {
+                        const bar = document.getElementById("bar");
+                        const status = document.getElementById("status");
+                        bar.style.width = data.progress + "%";
+                        bar.innerText = data.progress + "%";
+                        if (data.alert_sending) status.innerText = "⚠️ Sending alerts...";
+                        else if (data.arduino_triggered) status.innerText = "✅ Trigger received.";
+                        else status.innerText = "Waiting for Arduino trigger...";
+                        setTimeout(updateStatus, 1000);
+                    })
+                    .catch(() => setTimeout(updateStatus, 3000));
+            }
             updateStatus();
         </script>
     </body>
@@ -128,8 +125,9 @@ def home():
     return render_template_string(html)
 
 
+# === SERVICE WORKER ===
 @app.route("/service-worker.js")
-def sw():
+def service_worker():
     js = """
     self.addEventListener("push", function(event) {
       const data = event.data ? event.data.text() : "Barangay Alert!";
@@ -141,17 +139,19 @@ def sw():
       );
     });
     """
-    return js, 200, {'Content-Type': 'application/javascript'}
+    return js, 200, {"Content-Type": "application/javascript"}
 
 
+# === SUBSCRIBE ENDPOINT ===
 @app.route("/subscribe", methods=["POST"])
 def subscribe():
     sub = request.get_json()
     subscribers.append(sub)
-    print("✅ New subscriber added")
+    print("✅ New subscriber added.")
     return jsonify({"status": "Subscribed"}), 201
 
 
+# === ARDUINO TRIGGER ===
 @app.route("/arduino_trigger", methods=["POST"])
 def arduino_trigger():
     global arduino_triggered, alert_sending
@@ -161,6 +161,7 @@ def arduino_trigger():
     return jsonify({"status": "Arduino alert received"}), 200
 
 
+# === MANUAL ALERT (ADMIN) ===
 @app.route("/send_alert", methods=["GET"])
 def send_alert_manual():
     global arduino_triggered, alert_sending
@@ -170,6 +171,7 @@ def send_alert_manual():
     return jsonify({"status": "Manual alert triggered"}), 200
 
 
+# === STATUS CHECK ===
 @app.route("/check_status")
 def check_status():
     return jsonify({
@@ -179,11 +181,12 @@ def check_status():
     })
 
 
+# === ALERT LOGIC ===
 def send_alert():
     global alert_progress, alert_sending, arduino_triggered
     total = len(subscribers)
     if total == 0:
-        print("⚠️ No subscribers to notify.")
+        print("⚠️ No subscribers found.")
         alert_sending = False
         arduino_triggered = False
         return
@@ -196,13 +199,13 @@ def send_alert():
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims=VAPID_CLAIMS
             )
-            print(f"✅ Sent alert to subscriber {idx+1}")
+            print(f"✅ Alert sent to subscriber {idx+1}")
         except WebPushException as e:
             print(f"❌ Failed to send alert {idx+1}: {e}")
+        alert_progress = int(((idx + 1) / total) * 100)
+        time.sleep(0.05)
 
-        alert_progress = int(((idx+1)/total)*100)
-        time.sleep(0.1)
-
+    alert_progress = 100
     time.sleep(1)
     alert_sending = False
     arduino_triggered = False
