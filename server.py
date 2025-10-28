@@ -15,6 +15,8 @@ subscribers = []
 arduino_triggered = False
 alert_sending = False
 alert_progress = 0
+alert_history = []  # Store recent alerts for polling
+last_alert_id = 0
 
 
 # === USER PAGE ===
@@ -41,84 +43,156 @@ def user_page():
       <div id="alertStatus" style="margin-top: 20px; padding: 15px; border-radius: 6px; display: none;"></div>
 
       <script>
-        let isSubscribed = false;
-        const vapidKey = "{VAPID_PUBLIC_KEY}";
+        let notificationEnabled = false;
+        let lastAlertId = 0;
+        let checkInterval = null;
+        
         async function subscribeUser() {{
-          const reg = await navigator.serviceWorker.register("/service-worker.js");
-          const permission = await Notification.requestPermission();
-          if (permission !== "granted") {{
-            alert("Please allow notifications to receive alerts.");
+          const statusDiv = document.getElementById("alertStatus");
+          
+          // Check if Notification API is supported
+          if (!("Notification" in window)) {{
+            statusDiv.style.display = "block";
+            statusDiv.style.background = "#f8d7da";
+            statusDiv.style.color = "#721c24";
+            statusDiv.innerHTML = "<strong>⚠️ Browser Not Supported</strong><br>" +
+              "Your browser doesn't support notifications. Please use Chrome, Firefox, Edge, or Safari.";
             return;
           }}
-          const sub = await reg.pushManager.subscribe({{
-            userVisibleOnly: true,
-            applicationServerKey: urlBase64ToUint8Array(vapidKey)
-          }});
-          await fetch("/subscribe", {{
-            method: "POST",
-            headers: {{ "Content-Type": "application/json" }},
-            body: JSON.stringify(sub)
-          }});
-          isSubscribed = true;
-          alert("✅ You are now subscribed for barangay alerts!");
           
-          // Show subscription status
-          const statusDiv = document.getElementById("alertStatus");
-          statusDiv.style.display = "block";
-          statusDiv.style.background = "#d4edda";
-          statusDiv.style.color = "#155724";
-          statusDiv.innerHTML = "<strong>✅ Subscribed!</strong><br>You will receive notifications when emergency alerts are sent.";
-        }}
-        
-        // Handle subscription changes (when subscription expires)
-        async function checkAndRenewSubscription() {{
-          if ("serviceWorker" in navigator && "PushManager" in window) {{
-            try {{
-              const reg = await navigator.serviceWorker.ready;
-              const subscription = await reg.pushManager.getSubscription();
+          try {{
+            statusDiv.style.display = "block";
+            statusDiv.style.background = "#d1ecf1";
+            statusDiv.style.color = "#0c5460";
+            statusDiv.innerHTML = "⏳ Requesting notification permission...";
+            
+            // Request notification permission
+            const permission = await Notification.requestPermission();
+            
+            if (permission === "granted") {{
+              notificationEnabled = true;
+              statusDiv.style.background = "#d4edda";
+              statusDiv.style.color = "#155724";
+              statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
+                "You will receive alerts when emergency notifications are sent.";
               
-              if (!subscription) {{
-                // Subscription expired, ask user to resubscribe
-                const statusDiv = document.getElementById("alertStatus");
-                if (statusDiv && isSubscribed) {{
-                  statusDiv.style.display = "block";
-                  statusDiv.style.background = "#fff3cd";
-                  statusDiv.style.color = "#856404";
-                  statusDiv.innerHTML = "<strong>⚠️ Subscription Expired</strong><br>Please click the subscribe button again to continue receiving alerts.";
-                  isSubscribed = false;
-                }}
-              }} else {{
-                // Update subscription on server
-                await fetch("/subscribe", {{
-                  method: "POST",
-                  headers: {{ "Content-Type": "application/json" }},
-                  body: JSON.stringify(subscription)
-                }});
-              }}
-            }} catch (err) {{
-              console.log("Subscription check error:", err);
+              // Register for polling
+              await fetch("/register_user", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ enabled: true }})
+              }});
+              
+              // Start checking for alerts
+              startCheckingAlerts();
+              
+              console.log("✅ Notifications enabled");
+            }} else if (permission === "denied") {{
+              statusDiv.style.background = "#fff3cd";
+              statusDiv.style.color = "#856404";
+              statusDiv.innerHTML = "<strong>⚠️ Permission Denied</strong><br>" +
+                "Please allow notifications in your browser settings to receive alerts.";
+            }} else {{
+              statusDiv.style.background = "#fff3cd";
+              statusDiv.style.color = "#856404";
+              statusDiv.innerHTML = "<strong>⚠️ Permission Not Set</strong><br>" +
+                "Please click the button again and allow notifications when prompted.";
             }}
+          }} catch (err) {{
+            console.error("Error enabling notifications:", err);
+            statusDiv.style.background = "#f8d7da";
+            statusDiv.style.color = "#721c24";
+            statusDiv.innerHTML = "<strong>❌ Error</strong><br>" +
+              "Failed to enable notifications. Please try again.";
           }}
         }}
         
-        // Check subscription status when page loads
-        checkAndRenewSubscription();
+        function showNotification(title, message) {{
+          if (Notification.permission === "granted") {{
+            const notification = new Notification(title, {{
+              body: message,
+              icon: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
+              badge: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
+              tag: "barangay-alert",
+              requireInteraction: true
+            }});
+            
+            notification.onclick = function() {{
+              window.focus();
+              notification.close();
+            }};
+            
+            // Auto close after 10 seconds
+            setTimeout(() => notification.close(), 10000);
+          }}
+        }}
         
-        // Check if notifications are supported
-        if ("Notification" in window && "serviceWorker" in navigator) {{
-          console.log("Push notifications supported!");
-        }} else {{
-          alert("Your browser does not support push notifications.");
+        function startCheckingAlerts() {{
+          // Check every 3 seconds for new alerts
+          if (checkInterval) clearInterval(checkInterval);
+          
+          checkInterval = setInterval(async () => {{
+            if (Notification.permission !== "granted") return;
+            
+            try {{
+              const response = await fetch("/check_alerts?last_id=" + lastAlertId);
+              const data = await response.json();
+              
+              if (data.has_new_alert && data.alert) {{
+                lastAlertId = data.alert.id;
+                showNotification("🚨 Barangay Emergency Alert 🚨", data.alert.message);
+                
+                // Update status
+                const statusDiv = document.getElementById("alertStatus");
+                if (statusDiv) {{
+                  statusDiv.style.background = "#fff3cd";
+                  statusDiv.style.color = "#856404";
+                  statusDiv.innerHTML = "<strong>🔔 New Alert Received!</strong><br>" + data.alert.message;
+                  
+                  // Reset after 5 seconds
+                  setTimeout(() => {{
+                    statusDiv.style.background = "#d4edda";
+                    statusDiv.style.color = "#155724";
+                    statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
+                      "You will receive alerts when emergency notifications are sent.";
+                  }}, 5000);
+                }}
+              }}
+            }} catch (err) {{
+              console.error("Error checking alerts:", err);
+            }}
+          }}, 3000);
         }}
-
-        function urlBase64ToUint8Array(base64String) {{
-          const padding = "=".repeat((4 - base64String.length % 4) % 4);
-          const base64 = (base64String + padding).replace(/\\-/g, "+").replace(/_/g, "/");
-          const rawData = atob(base64);
-          const outputArray = new Uint8Array(rawData.length);
-          for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
-          return outputArray;
-        }}
+        
+        // Check permission status on load
+        window.addEventListener("load", function() {{
+          const statusDiv = document.getElementById("alertStatus");
+          
+          if ("Notification" in window) {{
+            if (Notification.permission === "granted") {{
+              notificationEnabled = true;
+              statusDiv.style.display = "block";
+              statusDiv.style.background = "#d4edda";
+              statusDiv.style.color = "#155724";
+              statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
+                "You will receive alerts when emergency notifications are sent.";
+              startCheckingAlerts();
+              
+              // Get last alert ID
+              fetch("/check_alerts").then(r => r.json()).then(data => {{
+                if (data.alert) lastAlertId = data.alert.id;
+              }});
+            }} else {{
+              console.log("✅ Browser supports notifications - click button to enable");
+            }}
+          }} else {{
+            statusDiv.style.display = "block";
+            statusDiv.style.background = "#fff3cd";
+            statusDiv.style.color = "#856404";
+            statusDiv.innerHTML = "<strong>⚠️ Browser Not Supported</strong><br>" +
+              "Your browser doesn't support notifications. Please use Chrome, Firefox, Edge, or Safari.";
+          }}
+        }});
       </script>
     </body>
     </html>
@@ -147,7 +221,7 @@ def admin_page():
     <body>
       <h1>🧑‍💼 Barangay Admin Dashboard</h1>
       <p>Monitor system status and send alerts to all residents.</p>
-      <button onclick="triggerAlert()">🚨 Send Emergency Alert</button>
+      <button onclick="triggerAlert(event)">🚨 Send Emergency Alert</button>
 
       <div class="progress-container">
         <div class="progress-bar" id="bar">0%</div>
@@ -156,17 +230,45 @@ def admin_page():
       <div id="subscriberCount" style="margin-top: 10px; color: #7f8c8d;">No subscribers yet</div>
 
       <script>
-        function triggerAlert() {
+        function triggerAlert(event) {
+          const status = document.getElementById("status");
+          const button = event ? event.target : document.querySelector('button');
+          
+          // Disable button temporarily
+          button.disabled = true;
+          button.style.opacity = "0.6";
+          
+          status.innerText = "⏳ Triggering alert...";
+          
           fetch('/send_alert')
-            .then(r => r.json())
+            .then(r => {
+              if (!r.ok) {
+                return r.json().then(data => {
+                  throw new Error(data.message || "Failed to send alert");
+                });
+              }
+              return r.json();
+            })
             .then(data => {
               console.log("Alert triggered:", data);
-              const status = document.getElementById("status");
-              status.innerText = "⚠️ Sending emergency alert to all subscribers...";
+              status.innerText = `⚠️ Alert sent! Notifying ${data.subscribers || 0} subscriber(s)...`;
+              status.style.color = "#e67e22";
+              
+              // Re-enable button after a delay
+              setTimeout(() => {
+                button.disabled = false;
+                button.style.opacity = "1";
+              }, 2000);
             })
             .catch(err => {
               console.error("Error:", err);
-              alert("Failed to send alert. Please try again.");
+              status.innerText = `❌ Error: ${err.message}`;
+              status.style.color = "#e74c3c";
+              alert("Failed to send alert: " + err.message);
+              
+              // Re-enable button
+              button.disabled = false;
+              button.style.opacity = "1";
             });
         }
 
@@ -297,19 +399,49 @@ def arduino_trigger():
 # === MANUAL ALERT (ADMIN) ===
 @app.route("/send_alert", methods=["GET", "POST"])
 def send_alert_manual():
-    global arduino_triggered, alert_sending, alert_progress
-    if alert_sending:
-        return jsonify({"status": "Alert already sending", "message": "Please wait for current alert to finish"}), 400
+    global arduino_triggered, alert_sending, alert_progress, subscribers
     
-    arduino_triggered = True
-    alert_sending = True
-    alert_progress = 0
-    threading.Thread(target=send_alert).start()
-    return jsonify({
-        "status": "success", 
-        "message": "Emergency alert triggered and sending to all subscribers",
-        "subscribers": len(subscribers)
-    }), 200
+    try:
+        if alert_sending:
+            return jsonify({
+                "status": "error",
+                "message": "Alert already sending. Please wait for current alert to finish."
+            }), 400
+        
+        total_subscribers = len(subscribers)
+        
+        if total_subscribers == 0:
+            return jsonify({
+                "status": "error",
+                "message": "No subscribers found. Users need to subscribe first.",
+                "subscribers": 0
+            }), 400
+        
+        # Reset and start alert
+        arduino_triggered = False
+        alert_sending = True
+        alert_progress = 0
+        
+        # Start sending in background thread
+        thread = threading.Thread(target=send_alert)
+        thread.daemon = True
+        thread.start()
+        
+        print(f"🚨 Admin triggered alert to {total_subscribers} subscriber(s)")
+        
+        return jsonify({
+            "status": "success", 
+            "message": "Emergency alert triggered and sending to all subscribers",
+            "subscribers": total_subscribers
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Error in send_alert_manual: {e}")
+        alert_sending = False
+        return jsonify({
+            "status": "error",
+            "message": f"Error triggering alert: {str(e)}"
+        }), 500
 
 
 # === STATUS CHECK ===
@@ -350,11 +482,19 @@ def send_alert():
     
     for idx, sub in enumerate(subscribers_copy):
         try:
+            # Validate subscription before sending
+            if not sub or not sub.get('endpoint'):
+                print(f"⚠️ Subscriber {idx+1} has invalid subscription data")
+                expired_subscriptions.append(sub)
+                failed_count += 1
+                continue
+            
             webpush(
                 subscription_info=sub,
                 data="🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
                 vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims=VAPID_CLAIMS
+                vapid_claims=VAPID_CLAIMS,
+                ttl=86400  # 24 hours TTL for push notifications
             )
             print(f"✅ Alert sent to subscriber {idx+1}/{total}")
             success_count += 1
@@ -396,6 +536,20 @@ def send_alert():
         print(f"🧹 Removed {len(expired_subscriptions)} expired subscription(s)")
 
     alert_progress = 100
+    
+    # Create alert entry for simple notification polling
+    global last_alert_id
+    last_alert_id += 1
+    new_alert = {
+        "id": last_alert_id,
+        "message": "🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
+        "timestamp": time.time()
+    }
+    alert_history.append(new_alert)
+    # Keep only last 100 alerts
+    if len(alert_history) > 100:
+        alert_history.pop(0)
+    
     print(f"✅ Alert sending complete! Success: {success_count}, Failed: {failed_count}")
     alert_sending = False
     # Keep arduino_triggered True for 3 seconds to show success message
@@ -404,10 +558,41 @@ def send_alert():
     alert_progress = 0
 
 
+# === SIMPLE NOTIFICATION ENDPOINTS ===
+@app.route("/register_user", methods=["POST"])
+def register_user():
+    # Just acknowledge - we don't need to store users for simple notifications
+    return jsonify({"status": "registered"}), 200
+
+
+@app.route("/check_alerts")
+def check_alerts():
+    last_id = request.args.get("last_id", "0")
+    try:
+        last_id = int(last_id)
+    except:
+        last_id = 0
+    
+    # Check if there's a new alert
+    if alert_history:
+        latest_alert = alert_history[-1]
+        if latest_alert["id"] > last_id:
+            return jsonify({
+                "has_new_alert": True,
+                "alert": latest_alert
+            }), 200
+    
+    return jsonify({
+        "has_new_alert": False,
+        "alert": alert_history[-1] if alert_history else None
+    }), 200
+
+
 @app.route("/")
 def home():
     return "<h3>Barangay Alert System is running. Visit /user or /admin.</h3>"
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
