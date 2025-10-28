@@ -23,6 +23,7 @@ VAPID_CLAIMS = {"sub": "mailto:dukeharveylingcodo@gmail.com"}
 
 subscribers = []  # Push notification subscribers
 simple_notification_users = set()  # Users registered for simple notifications (by session/IP)
+active_pollers = {}  # Track active users checking for alerts (last_check_time)
 arduino_triggered = False
 alert_sending = False
 alert_progress = 0
@@ -481,11 +482,21 @@ def check_status():
 # === GET SUBSCRIBERS COUNT ===
 @app.route("/get_subscribers")
 def get_subscribers():
-    total_count = len(simple_notification_users) + len(subscribers)
+    # Count active pollers (users actively checking) + registered users + push subscribers
+    active_count = len(active_pollers)
+    registered_count = len(simple_notification_users)
+    push_count = len(subscribers)
+    
+    # Use the higher count between active pollers and registered users
+    simple_count = max(active_count, registered_count)
+    total_count = simple_count + push_count
+    
     return jsonify({
         "count": total_count,
-        "simple_users": len(simple_notification_users),
-        "push_users": len(subscribers)
+        "simple_users": simple_count,
+        "push_users": push_count,
+        "active_pollers": active_count,
+        "registered_users": registered_count
     })
 
 
@@ -616,11 +627,25 @@ def register_user():
 
 @app.route("/check_alerts")
 def check_alerts():
+    global active_pollers
     last_id = request.args.get("last_id", "0")
     try:
         last_id = int(last_id)
     except:
         last_id = 0
+    
+    # Track active pollers (users actively checking)
+    user_identifier = f"{request.remote_addr}_{request.headers.get('User-Agent', '')}"
+    active_pollers[user_identifier] = time.time()
+    
+    # Remove inactive pollers (haven't checked in last 10 seconds)
+    current_time = time.time()
+    active_pollers = {k: v for k, v in active_pollers.items() if current_time - v < 10}
+    
+    # Also add to simple_notification_users if not already there
+    if user_identifier not in simple_notification_users:
+        simple_notification_users.add(user_identifier)
+        print(f"✅ Active poller registered: {len(simple_notification_users)} total simple users")
     
     # Check if there's a new alert
     if alert_history:
