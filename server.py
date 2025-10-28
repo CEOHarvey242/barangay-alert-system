@@ -44,9 +44,17 @@ def user_page():
       <style>
         body {{ font-family: Arial; background: #eef3f7; text-align: center; padding-top: 80px; }}
         h1 {{ color: #e74c3c; }}
-        button {{ background:#3498db; color:#fff; border:none; border-radius:6px; padding:12px 20px; font-size:16px; cursor:pointer; }}
-        button:hover {{ background:#2980b9; }}
-      </style>
+         button {{ background:#3498db; color:#fff; border:none; border-radius:6px; padding:12px 20px; font-size:16px; cursor:pointer; }}
+         button:hover {{ background:#2980b9; }}
+         @keyframes pulse {{
+           0% {{ transform: scale(1); }}
+           50% {{ transform: scale(1.02); }}
+           100% {{ transform: scale(1); }}
+         }}
+         #alertStatus {{
+           transition: all 0.3s ease;
+         }}
+       </style>
     </head>
     <body>
       <h1>🚨 Barangay Alert - Resident Portal</h1>
@@ -126,73 +134,117 @@ def user_page():
           }}
         }}
         
-        function showNotification(title, message) {{
-          if (Notification.permission === "granted") {{
-            const notification = new Notification(title, {{
-              body: message,
-              icon: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
-              badge: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
-              tag: "barangay-alert",
-              requireInteraction: true
-            }});
-            
-            notification.onclick = function() {{
-              window.focus();
-              notification.close();
-            }};
-            
-            // Auto close after 10 seconds
-            setTimeout(() => notification.close(), 10000);
-          }}
-        }}
+         function showNotification(title, message) {{
+           if (Notification.permission === "granted") {{
+             try {{
+               const notification = new Notification(title, {{
+                 body: message,
+                 icon: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
+                 badge: "https://upload.wikimedia.org/wikipedia/commons/e/e7/Alert_icon.svg",
+                 tag: "barangay-alert",
+                 requireInteraction: true,
+                 vibrate: [200, 100, 200],  // Vibrate on mobile
+                 sound: "",  // Some mobile browsers use sound
+                 silent: false
+               }});
+               
+               notification.onclick = function() {{
+                 window.focus();
+                 notification.close();
+               }};
+               
+               // Auto close after 15 seconds (longer for mobile)
+               setTimeout(() => notification.close(), 15000);
+               
+               // Also show alert for mobile browsers that don't support notifications well
+               console.log("Notification shown:", title, message);
+             }} catch (err) {{
+               console.error("Error showing notification:", err);
+               // Fallback: show alert for mobile
+               alert(title + "\\n\\n" + message);
+             }}
+           }} else {{
+             // Fallback for when permission not granted
+             alert(title + "\\n\\n" + message);
+           }}
+         }}
         
-        function startCheckingAlerts() {{
-          // Check every 3 seconds for new alerts
-          if (checkInterval) clearInterval(checkInterval);
-          
-          // Immediate first check to register user
-          (async () => {{
-            try {{
-              const response = await fetch("/check_alerts?last_id=" + lastAlertId);
-              const data = await response.json();
-              if (data.alert) lastAlertId = data.alert.id || 0;
-            }} catch (err) {{
-              console.error("Initial check error:", err);
-            }}
-          }})();
-          
-          checkInterval = setInterval(async () => {{
-            if (Notification.permission !== "granted") return;
-            
-            try {{
-              const response = await fetch("/check_alerts?last_id=" + lastAlertId);
-              const data = await response.json();
-              
-              if (data.has_new_alert && data.alert) {{
-                lastAlertId = data.alert.id || lastAlertId;
-                showNotification("🚨 Barangay Emergency Alert 🚨", data.alert.message);
-                
-                // Update status
-                const statusDiv = document.getElementById("alertStatus");
-                if (statusDiv) {{
-                  statusDiv.style.background = "#fff3cd";
-                  statusDiv.style.color = "#856404";
-                  statusDiv.innerHTML = "<strong>🔔 New Alert Received!</strong><br>" + data.alert.message;
-                  
-                  // Reset after 5 seconds
-                  setTimeout(() => {{
-                    statusDiv.style.background = "#d4edda";
-                    statusDiv.style.color = "#155724";
-                    statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
-                      "You will receive alerts when emergency notifications are sent.";
-                  }}, 5000);
-                }}
-              }}
-            }} catch (err) {{
-              console.error("Error checking alerts:", err);
-            }}
-          }}, 3000);
-        }}
+         function startCheckingAlerts() {{
+           // Check every 3 seconds for new alerts
+           if (checkInterval) clearInterval(checkInterval);
+           
+           // Immediate first check to register user
+           (async () => {{
+             try {{
+               const response = await fetch("/check_alerts?last_id=" + lastAlertId);
+               const data = await response.json();
+               if (data.alert) lastAlertId = data.alert.id || 0;
+             }} catch (err) {{
+               console.error("Initial check error:", err);
+             }}
+           }})();
+           
+           checkInterval = setInterval(async () => {{
+             // Check even without notification permission - use visual alert instead
+             try {{
+               const response = await fetch("/check_alerts?last_id=" + lastAlertId);
+               const data = await response.json();
+               
+               if (data.has_new_alert && data.alert) {{
+                 lastAlertId = data.alert.id || lastAlertId;
+                 
+                 // Show notification
+                 showNotification("🚨 Barangay Emergency Alert 🚨", data.alert.message);
+                 
+                 // Also vibrate on mobile if supported
+                 if (navigator.vibrate) {{
+                   navigator.vibrate([200, 100, 200, 100, 200]);
+                 }}
+                 
+                 // Update status with visual alert
+                 const statusDiv = document.getElementById("alertStatus");
+                 if (statusDiv) {{
+                   statusDiv.style.background = "#f8d7da";
+                   statusDiv.style.color = "#721c24";
+                   statusDiv.style.border = "2px solid #e74c3c";
+                   statusDiv.style.animation = "pulse 2s infinite";
+                   statusDiv.innerHTML = "<strong>🚨🔔 NEW ALERT RECEIVED! 🔔🚨</strong><br><br>" + 
+                     data.alert.message + 
+                     "<br><br><small>Tap to dismiss</small>";
+                   
+                   // Make it clickable to dismiss
+                   statusDiv.style.cursor = "pointer";
+                   statusDiv.onclick = function() {{
+                     statusDiv.style.background = "#d4edda";
+                     statusDiv.style.color = "#155724";
+                     statusDiv.style.border = "none";
+                     statusDiv.style.animation = "none";
+                     statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
+                       "You will receive alerts when emergency notifications are sent.";
+                     statusDiv.style.cursor = "default";
+                     statusDiv.onclick = null;
+                   }};
+                   
+                   // Auto reset after 30 seconds (longer for mobile)
+                   setTimeout(() => {{
+                     if (statusDiv.style.background === "#f8d7da") {{
+                       statusDiv.style.background = "#d4edda";
+                       statusDiv.style.color = "#155724";
+                       statusDiv.style.border = "none";
+                       statusDiv.style.animation = "none";
+                       statusDiv.innerHTML = "<strong>✅ Notifications Enabled!</strong><br>" +
+                         "You will receive alerts when emergency notifications are sent.";
+                       statusDiv.style.cursor = "default";
+                       if (statusDiv.onclick) statusDiv.onclick = null;
+                     }}
+                   }}, 30000);
+                 }}
+               }}
+             }} catch (err) {{
+               console.error("Error checking alerts:", err);
+             }}
+           }}, 3000);
+         }}
         
         // Check permission status on load
         window.addEventListener("load", function() {{
@@ -329,30 +381,30 @@ def admin_page():
                 status.style.color = "#2c3e50";
               }
               
-              // Update subscriber count
-              fetch('/get_subscribers')
-                .then(r => r.json())
-                .then(result => {
-                  const countDiv = document.getElementById("subscriberCount");
-                  const count = result.count || 0;
-                  const active = result.active_pollers || 0;
-                  const registered = result.registered_users || 0;
-                  
-                  if (count > 0) {
-                    countDiv.style.color = "#27ae60";
-                    countDiv.innerHTML = `📱 Total Subscribers: <strong>${count}</strong>`;
-                    if (active > 0 || registered > 0) {
-                      countDiv.innerHTML += `<br><small style="color: #7f8c8d;">Active: ${active} | Registered: ${registered}</small>`;
-                    }
-                  } else {
-                    countDiv.style.color = "#e74c3c";
-                    countDiv.innerHTML = `📱 Total Subscribers: <strong>0</strong><br><small>⚠️ No subscribers yet. Users need to subscribe first.</small>`;
-                  }
-                  console.log("Subscriber count updated:", result);
-                })
-                .catch(err => {
-                  console.error("Error fetching subscriber count:", err);
-                });
+               // Update subscriber count
+               fetch('/get_subscribers')
+                 .then(r => r.json())
+                 .then(result => {
+                   const countDiv = document.getElementById("subscriberCount");
+                   const count = result.count || 0;
+                   const active = result.active_pollers || 0;
+                   const registered = result.registered_users || 0;
+                   
+                   if (count > 0) {
+                     countDiv.style.color = "#27ae60";
+                     countDiv.innerHTML = `📱 Total Subscribers: <strong>${count}</strong>`;
+                     if (active > 0 || registered > 0) {
+                       countDiv.innerHTML += `<br><small style="color: #7f8c8d;">Active: ${active} | Registered: ${registered}</small>`;
+                     }
+                   } else {
+                     countDiv.style.color = "#e74c3c";
+                     countDiv.innerHTML = `📱 Total Subscribers: <strong>0</strong><br><small>⚠️ No subscribers yet. Users need to subscribe first.</small>`;
+                   }
+                   console.log("Subscriber count updated:", result);
+                 })
+                 .catch(err => {
+                   console.error("Error fetching subscriber count:", err);
+                 });
               
               setTimeout(updateStatus, 1000);
             })
@@ -507,19 +559,23 @@ def check_status():
 # === GET SUBSCRIBERS COUNT ===
 @app.route("/get_subscribers")
 def get_subscribers():
+    global simple_notification_users, active_pollers, subscribers
+    
     # Count active pollers (users actively checking) + registered users + push subscribers
     active_count = len(active_pollers)
     registered_count = len(simple_notification_users)
     push_count = len(subscribers)
     
-    # Use the higher count between active pollers and registered users
-    simple_count = max(active_count, registered_count) if active_count > 0 or registered_count > 0 else 0
+    # Combine registered users and active pollers (union of both sets)
+    # This ensures we count all users who have either registered or are actively polling
+    simple_count = len(simple_notification_users.union(set(active_pollers.keys())))
     total_count = simple_count + push_count
     
     # Debug logging
     print(f"📊 Subscriber count check:")
     print(f"   Active pollers: {active_count}")
     print(f"   Registered users: {registered_count}")
+    print(f"   Simple users (union): {simple_count}")
     print(f"   Push subscribers: {push_count}")
     print(f"   Total count: {total_count}")
     
@@ -536,16 +592,18 @@ def get_subscribers():
 def send_alert():
     global alert_progress, alert_sending, arduino_triggered, subscribers, simple_notification_users, last_alert_id, alert_history, active_pollers
     
-    # Count both registered users and active pollers
+    # Count both registered users and active pollers (union)
     registered_count = len(simple_notification_users)
     active_count = len(active_pollers)
-    simple_count = max(registered_count, active_count)  # Use whichever is higher
+    # Combine both sets to get actual unique users
+    simple_count = len(simple_notification_users.union(set(active_pollers.keys())))
     push_count = len(subscribers)
     total = simple_count + push_count
     
     print(f"🔍 Alert sending check:")
     print(f"   Registered simple users: {registered_count}")
     print(f"   Active pollers: {active_count}")
+    print(f"   Simple users (union): {simple_count}")
     print(f"   Push subscribers: {push_count}")
     print(f"   Total count: {total}")
     
@@ -682,7 +740,7 @@ def register_user():
 
 @app.route("/check_alerts")
 def check_alerts():
-    global active_pollers
+    global active_pollers, simple_notification_users
     last_id = request.args.get("last_id", "0")
     try:
         last_id = int(last_id)
@@ -692,17 +750,17 @@ def check_alerts():
     # Track active pollers (users actively checking)
     user_identifier = f"{request.remote_addr}_{request.headers.get('User-Agent', '')}"
     
-    # Always update active pollers
+    # Always update active pollers timestamp
     active_pollers[user_identifier] = time.time()
     
-    # Remove inactive pollers (haven't checked in last 15 seconds - more lenient)
-    current_time = time.time()
-    active_pollers = {k: v for k, v in active_pollers.items() if current_time - v < 15}
-    
-    # Also add to simple_notification_users if not already there
+    # Also add to simple_notification_users immediately
     if user_identifier not in simple_notification_users:
         simple_notification_users.add(user_identifier)
-        print(f"✅ Active poller registered via check_alerts: {len(simple_notification_users)} total simple users")
+        print(f"✅ Active poller auto-registered: {len(simple_notification_users)} total simple users")
+    
+    # Remove inactive pollers (haven't checked in last 15 seconds - more lenient for Render)
+    current_time = time.time()
+    active_pollers = {k: v for k, v in active_pollers.items() if current_time - v < 15}
     
     # Check if there's a new alert
     if alert_history:
