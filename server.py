@@ -9,8 +9,11 @@ app = Flask(__name__)
 # Add CSP headers to allow inline scripts (needed for Render)
 @app.after_request
 def set_csp_header(response):
-    # Allow inline scripts for our own code
-    response.headers['Content-Security-Policy'] = "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+    # Allow inline scripts for our own code - needed for inline JavaScript in templates
+    # Remove existing CSP if any to avoid conflicts
+    if 'Content-Security-Policy' in response.headers:
+        del response.headers['Content-Security-Policy']
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;"
     return response
 
 # === CONFIGURATION ===
@@ -488,92 +491,103 @@ def get_subscribers():
 
 # === ALERT LOGIC ===
 def send_alert():
-    global alert_progress, alert_sending, arduino_triggered, subscribers
-    total = len(subscribers)
+    global alert_progress, alert_sending, arduino_triggered, subscribers, simple_notification_users, last_alert_id, alert_history
+    total = len(simple_notification_users) + len(subscribers)
+    
     if total == 0:
         print("⚠️ No subscribers found.")
         alert_sending = False
         arduino_triggered = False
         alert_progress = 0
         return
-
+    
     print(f"🚨 Starting to send emergency alert to {total} subscriber(s)...")
-    success_count = 0
+    
+    # For simple notification users, just create alert entry (they poll for it)
+    simple_count = len(simple_notification_users)
+    if simple_count > 0:
+        last_alert_id += 1
+        new_alert = {
+            "id": last_alert_id,
+            "message": "🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
+            "timestamp": time.time()
+        }
+        alert_history.append(new_alert)
+        # Keep only last 100 alerts
+        if len(alert_history) > 100:
+            alert_history.pop(0)
+        print(f"✅ Alert created for {simple_count} simple notification user(s)")
+    
+    # For push notification subscribers, send via webpush
+    push_count = len(subscribers)
+    success_count = simple_count
     failed_count = 0
     expired_subscriptions = []
     
-    # Make a copy to iterate safely since we'll modify the list
-    subscribers_copy = list(subscribers)
-    
-    for idx, sub in enumerate(subscribers_copy):
-        try:
-            # Validate subscription before sending
-            if not sub or not sub.get('endpoint'):
-                print(f"⚠️ Subscriber {idx+1} has invalid subscription data")
-                expired_subscriptions.append(sub)
-                failed_count += 1
-                continue
-            
-            webpush(
-                subscription_info=sub,
-                data="🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
-                vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims=VAPID_CLAIMS,
-                ttl=86400  # 24 hours TTL for push notifications
-            )
-            print(f"✅ Alert sent to subscriber {idx+1}/{total}")
-            success_count += 1
-        except WebPushException as e:
-            # Check if subscription is expired or invalid (410 Gone, 404 Not Found, 403 Forbidden)
-            error_message = str(e).lower()
-            is_permanent_error = False
-            
-            # Check error message for common expiration indicators
-            if "410" in str(e) or "gone" in error_message or "expired" in error_message or "unsubscribed" in error_message:
-                is_permanent_error = True
-                expired_subscriptions.append(sub)
-                print(f"⚠️ Subscriber {idx+1} subscription expired/invalid (will be removed)")
-            elif "404" in str(e) or "not found" in error_message:
-                is_permanent_error = True
-                expired_subscriptions.append(sub)
-                print(f"⚠️ Subscriber {idx+1} subscription not found (will be removed)")
-            elif "403" in str(e) or "forbidden" in error_message:
-                is_permanent_error = True
-                expired_subscriptions.append(sub)
-                print(f"⚠️ Subscriber {idx+1} subscription forbidden (will be removed)")
-            
-            if not is_permanent_error:
-                print(f"❌ Failed to send alert to subscriber {idx+1}: {e}")
-            
-            failed_count += 1
-        except Exception as e:
-            print(f"❌ Unexpected error sending to subscriber {idx+1}: {e}")
-            failed_count += 1
+    if push_count > 0:
+        # Make a copy to iterate safely since we'll modify the list
+        subscribers_copy = list(subscribers)
         
-        alert_progress = int(((idx + 1) / total) * 100)
-        time.sleep(0.1)
+        for idx, sub in enumerate(subscribers_copy):
+            try:
+                # Validate subscription before sending
+                if not sub or not sub.get('endpoint'):
+                    print(f"⚠️ Subscriber {idx+1} has invalid subscription data")
+                    expired_subscriptions.append(sub)
+                    failed_count += 1
+                    continue
+                
+                webpush(
+                    subscription_info=sub,
+                    data="🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims=VAPID_CLAIMS,
+                    ttl=86400  # 24 hours TTL for push notifications
+                )
+                print(f"✅ Alert sent to subscriber {idx+1}/{push_count}")
+                success_count += 1
+                
+            except WebPushException as e:
+                # Check if subscription is expired or invalid (410 Gone, 404 Not Found, 403 Forbidden)
+                error_message = str(e).lower()
+                is_permanent_error = False
+                
+                # Check error message for common expiration indicators
+                if "410" in str(e) or "gone" in error_message or "expired" in error_message or "unsubscribed" in error_message:
+                    is_permanent_error = True
+                    expired_subscriptions.append(sub)
+                    print(f"⚠️ Subscriber {idx+1} subscription expired/invalid (will be removed)")
+                elif "404" in str(e) or "not found" in error_message:
+                    is_permanent_error = True
+                    expired_subscriptions.append(sub)
+                    print(f"⚠️ Subscriber {idx+1} subscription not found (will be removed)")
+                elif "403" in str(e) or "forbidden" in error_message:
+                    is_permanent_error = True
+                    expired_subscriptions.append(sub)
+                    print(f"⚠️ Subscriber {idx+1} subscription forbidden (will be removed)")
+                
+                if not is_permanent_error:
+                    print(f"❌ Failed to send alert to subscriber {idx+1}: {e}")
+                
+                failed_count += 1
+            except Exception as e:
+                print(f"❌ Unexpected error sending to subscriber {idx+1}: {e}")
+                failed_count += 1
+            
+            # Calculate progress based on push subscribers only
+            push_progress = int(((idx + 1) / push_count) * 100) if push_count > 0 else 100
+            alert_progress = push_progress
+            time.sleep(0.1)
 
-    # Remove expired subscriptions
-    if expired_subscriptions:
-        for expired_sub in expired_subscriptions:
-            if expired_sub in subscribers:
-                subscribers.remove(expired_sub)
-        print(f"🧹 Removed {len(expired_subscriptions)} expired subscription(s)")
-
-    alert_progress = 100
-    
-    # Create alert entry for simple notification polling
-    global last_alert_id
-    last_alert_id += 1
-    new_alert = {
-        "id": last_alert_id,
-        "message": "🚨 URGENT: Emergency Alert from Barangay! Please check immediately!",
-        "timestamp": time.time()
-    }
-    alert_history.append(new_alert)
-    # Keep only last 100 alerts
-    if len(alert_history) > 100:
-        alert_history.pop(0)
+        # Remove expired subscriptions
+        if expired_subscriptions:
+            for expired_sub in expired_subscriptions:
+                if expired_sub in subscribers:
+                    subscribers.remove(expired_sub)
+            print(f"🧹 Removed {len(expired_subscriptions)} expired subscription(s)")
+    else:
+        # No push subscribers, just finish
+        alert_progress = 100
     
     print(f"✅ Alert sending complete! Success: {success_count}, Failed: {failed_count}")
     alert_sending = False
