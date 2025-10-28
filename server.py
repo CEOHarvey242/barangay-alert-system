@@ -91,8 +91,8 @@ def user_page():
               // Register for polling
               try {{
                 const regResponse = await fetch("/register_user", {{
-                  method: "POST",
-                  headers: {{ "Content-Type": "application/json" }},
+            method: "POST",
+            headers: {{ "Content-Type": "application/json" }},
                   body: JSON.stringify({{ enabled: true }})
                 }});
                 const regData = await regResponse.json();
@@ -150,6 +150,17 @@ def user_page():
           // Check every 3 seconds for new alerts
           if (checkInterval) clearInterval(checkInterval);
           
+          // Immediate first check to register user
+          (async () => {{
+            try {{
+              const response = await fetch("/check_alerts?last_id=" + lastAlertId);
+              const data = await response.json();
+              if (data.alert) lastAlertId = data.alert.id || 0;
+            }} catch (err) {{
+              console.error("Initial check error:", err);
+            }}
+          }})();
+          
           checkInterval = setInterval(async () => {{
             if (Notification.permission !== "granted") return;
             
@@ -158,7 +169,7 @@ def user_page():
               const data = await response.json();
               
               if (data.has_new_alert && data.alert) {{
-                lastAlertId = data.alert.id;
+                lastAlertId = data.alert.id || lastAlertId;
                 showNotification("🚨 Barangay Emergency Alert 🚨", data.alert.message);
                 
                 // Update status
@@ -324,15 +335,24 @@ def admin_page():
                 .then(result => {
                   const countDiv = document.getElementById("subscriberCount");
                   const count = result.count || 0;
-                  countDiv.innerText = `📱 Total Subscribers: ${count}`;
-                  if (count === 0) {
-                    countDiv.style.color = "#e74c3c";
-                    countDiv.innerHTML += " ⚠️ No subscribers yet. Users need to subscribe first.";
-                  } else {
+                  const active = result.active_pollers || 0;
+                  const registered = result.registered_users || 0;
+                  
+                  if (count > 0) {
                     countDiv.style.color = "#27ae60";
+                    countDiv.innerHTML = `📱 Total Subscribers: <strong>${count}</strong>`;
+                    if (active > 0 || registered > 0) {
+                      countDiv.innerHTML += `<br><small style="color: #7f8c8d;">Active: ${active} | Registered: ${registered}</small>`;
+                    }
+                  } else {
+                    countDiv.style.color = "#e74c3c";
+                    countDiv.innerHTML = `📱 Total Subscribers: <strong>0</strong><br><small>⚠️ No subscribers yet. Users need to subscribe first.</small>`;
                   }
+                  console.log("Subscriber count updated:", result);
                 })
-                .catch(() => {});
+                .catch(err => {
+                  console.error("Error fetching subscriber count:", err);
+                });
               
               setTimeout(updateStatus, 1000);
             })
@@ -425,7 +445,7 @@ def arduino_trigger():
 # === MANUAL ALERT (ADMIN) ===
 @app.route("/send_alert", methods=["GET", "POST"])
 def send_alert_manual():
-    global arduino_triggered, alert_sending, alert_progress, subscribers
+    global arduino_triggered, alert_sending, alert_progress, subscribers, simple_notification_users, active_pollers
     
     try:
         if alert_sending:
@@ -434,7 +454,12 @@ def send_alert_manual():
                 "message": "Alert already sending. Please wait for current alert to finish."
             }), 400
         
-        total_subscribers = len(subscribers)
+        # Count all subscribers (simple + push)
+        registered_count = len(simple_notification_users)
+        active_count = len(active_pollers)
+        simple_count = max(registered_count, active_count)
+        push_count = len(subscribers)
+        total_subscribers = simple_count + push_count
         
         if total_subscribers == 0:
             return jsonify({
@@ -488,8 +513,15 @@ def get_subscribers():
     push_count = len(subscribers)
     
     # Use the higher count between active pollers and registered users
-    simple_count = max(active_count, registered_count)
+    simple_count = max(active_count, registered_count) if active_count > 0 or registered_count > 0 else 0
     total_count = simple_count + push_count
+    
+    # Debug logging
+    print(f"📊 Subscriber count check:")
+    print(f"   Active pollers: {active_count}")
+    print(f"   Registered users: {registered_count}")
+    print(f"   Push subscribers: {push_count}")
+    print(f"   Total count: {total_count}")
     
     return jsonify({
         "count": total_count,
@@ -502,8 +534,20 @@ def get_subscribers():
 
 # === ALERT LOGIC ===
 def send_alert():
-    global alert_progress, alert_sending, arduino_triggered, subscribers, simple_notification_users, last_alert_id, alert_history
-    total = len(simple_notification_users) + len(subscribers)
+    global alert_progress, alert_sending, arduino_triggered, subscribers, simple_notification_users, last_alert_id, alert_history, active_pollers
+    
+    # Count both registered users and active pollers
+    registered_count = len(simple_notification_users)
+    active_count = len(active_pollers)
+    simple_count = max(registered_count, active_count)  # Use whichever is higher
+    push_count = len(subscribers)
+    total = simple_count + push_count
+    
+    print(f"🔍 Alert sending check:")
+    print(f"   Registered simple users: {registered_count}")
+    print(f"   Active pollers: {active_count}")
+    print(f"   Push subscribers: {push_count}")
+    print(f"   Total count: {total}")
     
     if total == 0:
         print("⚠️ No subscribers found.")
@@ -511,11 +555,10 @@ def send_alert():
         arduino_triggered = False
         alert_progress = 0
         return
-    
+
     print(f"🚨 Starting to send emergency alert to {total} subscriber(s)...")
     
     # For simple notification users, just create alert entry (they poll for it)
-    simple_count = len(simple_notification_users)
     if simple_count > 0:
         last_alert_id += 1
         new_alert = {
@@ -611,17 +654,29 @@ def send_alert():
 # === SIMPLE NOTIFICATION ENDPOINTS ===
 @app.route("/register_user", methods=["POST"])
 def register_user():
-    global simple_notification_users
+    global simple_notification_users, active_pollers
     # Track user by IP address and user agent
     user_id = f"{request.remote_addr}_{request.headers.get('User-Agent', '')}"
     simple_notification_users.add(user_id)
+    # Also add to active pollers to ensure they're counted immediately
+    active_pollers[user_id] = time.time()
+    
     total_users = len(simple_notification_users) + len(subscribers)
-    print(f"✅ User registered for simple notifications. Total users: {total_users}")
+    active_count = len(active_pollers)
+    
+    print(f"✅ User registered for simple notifications.")
+    print(f"   User ID: {user_id}")
+    print(f"   Simple users: {len(simple_notification_users)}")
+    print(f"   Active pollers: {active_count}")
+    print(f"   Push users: {len(subscribers)}")
+    print(f"   Total: {total_users}")
+    
     return jsonify({
         "status": "registered",
         "total_users": total_users,
         "simple_users": len(simple_notification_users),
-        "push_users": len(subscribers)
+        "push_users": len(subscribers),
+        "active_pollers": active_count
     }), 200
 
 
@@ -636,16 +691,18 @@ def check_alerts():
     
     # Track active pollers (users actively checking)
     user_identifier = f"{request.remote_addr}_{request.headers.get('User-Agent', '')}"
+    
+    # Always update active pollers
     active_pollers[user_identifier] = time.time()
     
-    # Remove inactive pollers (haven't checked in last 10 seconds)
+    # Remove inactive pollers (haven't checked in last 15 seconds - more lenient)
     current_time = time.time()
-    active_pollers = {k: v for k, v in active_pollers.items() if current_time - v < 10}
+    active_pollers = {k: v for k, v in active_pollers.items() if current_time - v < 15}
     
     # Also add to simple_notification_users if not already there
     if user_identifier not in simple_notification_users:
         simple_notification_users.add(user_identifier)
-        print(f"✅ Active poller registered: {len(simple_notification_users)} total simple users")
+        print(f"✅ Active poller registered via check_alerts: {len(simple_notification_users)} total simple users")
     
     # Check if there's a new alert
     if alert_history:
