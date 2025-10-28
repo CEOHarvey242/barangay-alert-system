@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, send_from_directory
+from flask import Flask, request, jsonify, render_template_string, send_from_directory, Response
 from pywebpush import webpush, WebPushException
 import threading
 import time
@@ -6,12 +6,20 @@ import os
 
 app = Flask(__name__)
 
+# Add CSP headers to allow inline scripts (needed for Render)
+@app.after_request
+def set_csp_header(response):
+    # Allow inline scripts for our own code
+    response.headers['Content-Security-Policy'] = "script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+    return response
+
 # === CONFIGURATION ===
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "BNex77xpbLX96KVS1zJhT0EthcP8rJYCnu5dTL_AO0t_5ewtTPKgmqmknWaJ_2WepQgQjodcxGcFGHhq_xdyR_E")
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "BkPQ0-CUpnv6QSV87QpPwdlUX9ADMRLQ5dKHXYZL-f4")
 VAPID_CLAIMS = {"sub": "mailto:dukeharveylingcodo@gmail.com"}
 
-subscribers = []
+subscribers = []  # Push notification subscribers
+simple_notification_users = set()  # Users registered for simple notifications (by session/IP)
 arduino_triggered = False
 alert_sending = False
 alert_progress = 0
@@ -77,11 +85,18 @@ def user_page():
                 "You will receive alerts when emergency notifications are sent.";
               
               // Register for polling
-              await fetch("/register_user", {{
-                method: "POST",
-                headers: {{ "Content-Type": "application/json" }},
-                body: JSON.stringify({{ enabled: true }})
-              }});
+              try {{
+                const regResponse = await fetch("/register_user", {{
+                  method: "POST",
+                  headers: {{ "Content-Type": "application/json" }},
+                  body: JSON.stringify({{ enabled: true }})
+                }});
+                const regData = await regResponse.json();
+                console.log("Registration response:", regData);
+              }} catch (regErr) {{
+                console.error("Registration error:", regErr);
+                // Continue anyway - polling will still work
+              }}
               
               // Start checking for alerts
               startCheckingAlerts();
@@ -182,6 +197,13 @@ def user_page():
               fetch("/check_alerts").then(r => r.json()).then(data => {{
                 if (data.alert) lastAlertId = data.alert.id;
               }});
+              
+              // Register user
+              fetch("/register_user", {{
+                method: "POST",
+                headers: {{ "Content-Type": "application/json" }},
+                body: JSON.stringify({{ enabled: true }})
+              }}).catch(err => console.log("Registration check failed:", err));
             }} else {{
               console.log("✅ Browser supports notifications - click button to enable");
             }}
@@ -456,8 +478,11 @@ def check_status():
 # === GET SUBSCRIBERS COUNT ===
 @app.route("/get_subscribers")
 def get_subscribers():
+    total_count = len(simple_notification_users) + len(subscribers)
     return jsonify({
-        "count": len(subscribers)
+        "count": total_count,
+        "simple_users": len(simple_notification_users),
+        "push_users": len(subscribers)
     })
 
 
@@ -561,8 +586,18 @@ def send_alert():
 # === SIMPLE NOTIFICATION ENDPOINTS ===
 @app.route("/register_user", methods=["POST"])
 def register_user():
-    # Just acknowledge - we don't need to store users for simple notifications
-    return jsonify({"status": "registered"}), 200
+    global simple_notification_users
+    # Track user by IP address and user agent
+    user_id = f"{request.remote_addr}_{request.headers.get('User-Agent', '')}"
+    simple_notification_users.add(user_id)
+    total_users = len(simple_notification_users) + len(subscribers)
+    print(f"✅ User registered for simple notifications. Total users: {total_users}")
+    return jsonify({
+        "status": "registered",
+        "total_users": total_users,
+        "simple_users": len(simple_notification_users),
+        "push_users": len(subscribers)
+    }), 200
 
 
 @app.route("/check_alerts")
